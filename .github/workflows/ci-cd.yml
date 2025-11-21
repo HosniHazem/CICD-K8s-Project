@@ -92,22 +92,39 @@ jobs:
         version: 'latest'
     
     - name: Configure kubectl
+      env:
+        KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
       run: |
         mkdir -p $HOME/.kube
-        echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+        echo "$KUBE_CONFIG" | base64 -d > $HOME/.kube/config
+        chmod 600 $HOME/.kube/config
+        export KUBECONFIG=$HOME/.kube/config
+        
+        # Verify connection
+        kubectl cluster-info
+        kubectl get nodes
     
     - name: Update deployment image
+      env:
+        KUBECONFIG: ${{ github.workspace }}/.kube/config
       run: |
+        mkdir -p ${{ github.workspace }}/.kube
+        echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ${{ github.workspace }}/.kube/config
+        
         kubectl set image deployment/cicd-demo-deployment \
           cicd-demo=${{ env.DOCKER_IMAGE }}:main-${{ github.sha }} \
           -n ${{ env.KUBERNETES_NAMESPACE }}
     
     - name: Verify deployment
+      env:
+        KUBECONFIG: ${{ github.workspace }}/.kube/config
       run: |
         kubectl rollout status deployment/cicd-demo-deployment \
           -n ${{ env.KUBERNETES_NAMESPACE }} \
           --timeout=5m
     
     - name: Get service info
+      env:
+        KUBECONFIG: ${{ github.workspace }}/.kube/config
       run: |
         kubectl get services cicd-demo-service -n ${{ env.KUBERNETES_NAMESPACE }}
