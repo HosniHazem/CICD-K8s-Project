@@ -1,0 +1,22 @@
+{
+  "name": "cicd-k8s-demo",
+  "version": "1.0.0",
+  "description": "CI/CD Demo with Docker and Kubernetes",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "test": "jest",
+    "dev": "nodemon app.js"
+  },
+  "keywords": ["docker", "kubernetes", "cicd"],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "jest": "^29.5.0",
+    "supertest": "^6.3.3",
+    "nodemon": "^2.0.22"
+  }
+}
