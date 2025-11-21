@@ -66,6 +66,12 @@ jobs:
           type=sha,prefix={{branch}}-
           type=raw,value=latest,enable={{is_default_branch}}
     
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        driver-opts: image=moby/buildkit:master
+        install: true
+
     - name: Build and push
       uses: docker/build-push-action@v5
       with:
@@ -75,6 +81,8 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=registry,ref=${{ env.DOCKER_IMAGE }}:buildcache
         cache-to: type=registry,ref=${{ env.DOCKER_IMAGE }}:buildcache,mode=max
+      env:
+        DOCKER_BUILDKIT: 1
 
   deploy:
     name: Deploy to Kubernetes
@@ -221,22 +229,38 @@ jobs:
           exit 1
         fi
     
-    - name: Update deployment image
-      run: |
-        export KUBECONFIG=$HOME/.kube/config
-        kubectl set image deployment/cicd-demo-deployment \
-          cicd-demo=${{ env.DOCKER_IMAGE }}:main-${{ github.sha }} \
-          -n ${{ env.KUBERNETES_NAMESPACE }}
-    
     - name: Verify deployment
       run: |
         export KUBECONFIG=$HOME/.kube/config
-        kubectl rollout status deployment/cicd-demo-deployment \
-          -n ${{ env.KUBERNETES_NAMESPACE }} \
-          --timeout=5m
+        
+        # Wait for deployment to be available
+        kubectl wait --for=condition=available --timeout=300s deployment/cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }}
+        
+        # Verify deployment status
+        kubectl rollout status deployment/cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }} --timeout=300s
+        
+        # Get deployment details
+        kubectl get deployment/cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }} -o wide
     
-    - name: Get service info
+    - name: Get service and pod info
       run: |
         export KUBECONFIG=$HOME/.kube/config
-        kubectl get services cicd-demo-service -n ${{ env.KUBERNETES_NAMESPACE }}
-        kubectl get pods -l app=cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }}
+        echo "=== Service Information ==="
+        kubectl get service/cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }} -o wide
+        echo -e "\n=== Pods Information ==="
+        kubectl get pods -l app=cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }} -o wide
+        
+        # Get service URL
+        echo -e "\n=== Application URL ==="
+        minikube service cicd-demo --url -n ${{ env.KUBERNETES_NAMESPACE }}
+        
+        # Get pod logs
+        echo -e "\n=== Pod Logs ==="
+        kubectl logs -l app=cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }} --tail=50 || echo "No logs available yet"
+    
+    - name: Health check
+      run: |
+        export KUBECONFIG=$HOME/.kube/config
+        SERVICE_URL=$(minikube service cicd-demo --url -n ${{ env.KUBERNETES_NAMESPACE }} | head -n 1)
+        echo "Testing service at: $SERVICE_URL"
+        curl -sSf $SERVICE_URL || echo "Service not yet available"
