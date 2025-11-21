@@ -6,7 +6,8 @@ app.get('/', (req, res) => {
   res.json({
     message: 'Hello from CI/CD K8s Demo!',
     version: '1.0.0',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    jaw : "jawww"
   });
 });
 
