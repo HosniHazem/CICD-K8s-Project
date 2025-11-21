@@ -96,48 +96,132 @@ jobs:
       run: |
         kubectl cluster-info
         kubectl get nodes
+        echo "Minikube is running"
     
-    - name: Deploy to Kubernetes
+    - name: Build image in Minikube
       run: |
-        # Use existing k8s directory
+        eval $(minikube docker-env)
+        docker build -t ${{ env.DOCKER_IMAGE }}:main-${{ github.sha }} .
+        docker tag ${{ env.DOCKER_IMAGE }}:main-${{ github.sha }} ${{ env.DOCKER_IMAGE }}:latest
+        echo "Image built successfully in Minikube"
+        docker images | grep cicd-demo
+    
+    - name: Prepare Kubernetes manifests
+      run: |
         if [ -d "k8s" ]; then
-          # Update image in deployment
-          sed -i "s|image:.*cicd-demo.*|image: ${{ env.DOCKER_IMAGE }}:main-${{ github.sha }}|" k8s/deployment.yaml
+          cp -r k8s k8s-deploy
+          sed -i "s|image:.*cicd-demo.*|image: ${{ env.DOCKER_IMAGE }}:main-${{ github.sha }}|" k8s-deploy/deployment.yaml
           
-          # Apply manifests
-          kubectl apply -f k8s/deployment.yaml
-          kubectl apply -f k8s/service.yaml
+          if ! grep -q "imagePullPolicy" k8s-deploy/deployment.yaml; then
+            sed -i '/image:/a\        imagePullPolicy: Never' k8s-deploy/deployment.yaml
+          else
+            sed -i 's/imagePullPolicy:.*/imagePullPolicy: Never/' k8s-deploy/deployment.yaml
+          fi
           
-          # Wait for deployment
-          kubectl rollout status deployment/cicd-demo-deployment --timeout=300s
+          echo "Updated deployment.yaml:"
+          cat k8s-deploy/deployment.yaml
         else
           echo "k8s directory not found"
           exit 1
         fi
     
+    - name: Deploy to Kubernetes
+      run: |
+        kubectl apply -f k8s-deploy/deployment.yaml
+        kubectl apply -f k8s-deploy/service.yaml
+        echo "Manifests applied successfully"
+    
+    - name: Wait for deployment
+      run: |
+        echo "Waiting for deployment to be ready..."
+        kubectl rollout status deployment/cicd-demo-deployment --timeout=300s
+    
     - name: Verify deployment
       run: |
-        echo "=== Deployment Status ==="
+        echo "======================================"
+        echo "Deployment Status"
+        echo "======================================"
         kubectl get deployment cicd-demo-deployment -o wide
         
-        echo "=== Pods ==="
+        echo ""
+        echo "======================================"
+        echo "Pods Status"
+        echo "======================================"
         kubectl get pods -l app=cicd-demo -o wide
         
-        echo "=== Service ==="
-        kubectl get service cicd-demo-service
+        echo ""
+        echo "======================================"
+        echo "Service Info"
+        echo "======================================"
+        kubectl get service cicd-demo-service -o wide
         
-        echo "=== Pod Logs ==="
-        kubectl logs -l app=cicd-demo --tail=20 || true
+        echo ""
+        echo "======================================"
+        echo "Recent Events"
+        echo "======================================"
+        kubectl get events --sort-by='.lastTimestamp' | tail -20
+        
+        echo ""
+        echo "======================================"
+        echo "Pod Logs"
+        echo "======================================"
+        kubectl logs -l app=cicd-demo --tail=50 --all-containers=true || echo "No logs available yet"
+    
+    - name: Debug on failure
+      if: failure()
+      run: |
+        echo "======================================"
+        echo "DEBUGGING INFORMATION"
+        echo "======================================"
+        
+        echo "Pod Descriptions:"
+        kubectl describe pods -l app=cicd-demo
+        
+        echo ""
+        echo "Deployment Description:"
+        kubectl describe deployment cicd-demo-deployment
+        
+        echo ""
+        echo "All Events:"
+        kubectl get events --sort-by='.lastTimestamp'
+        
+        echo ""
+        echo "Docker Images in Minikube:"
+        eval $(minikube docker-env)
+        docker images
     
     - name: Test application
       run: |
+        echo "Getting service URL..."
         SERVICE_URL=$(minikube service cicd-demo-service --url)
         echo "Service URL: $SERVICE_URL"
         
-        sleep 10
+        echo "Waiting for service to be ready..."
+        sleep 15
         
-        echo "Testing root endpoint..."
-        curl -s $SERVICE_URL || echo "Failed"
+        echo ""
+        echo "======================================"
+        echo "Testing Application Endpoints"
+        echo "======================================"
         
-        echo "Testing health endpoint..."
-        curl -s $SERVICE_URL/health || echo "Failed"
+        echo "Testing root endpoint (/)..."
+        if curl -s -f "$SERVICE_URL" > /dev/null; then
+          echo "✓ Root endpoint is working"
+          curl -s "$SERVICE_URL" | jq '.' || curl -s "$SERVICE_URL"
+        else
+          echo "✗ Root endpoint failed"
+        fi
+        
+        echo ""
+        echo "Testing health endpoint (/health)..."
+        if curl -s -f "$SERVICE_URL/health" > /dev/null; then
+          echo "✓ Health endpoint is working"
+          curl -s "$SERVICE_URL/health" | jq '.' || curl -s "$SERVICE_URL/health"
+        else
+          echo "✗ Health endpoint failed"
+        fi
+        
+        echo ""
+        echo "======================================"
+        echo "Deployment completed successfully!"
+        echo "======================================"
