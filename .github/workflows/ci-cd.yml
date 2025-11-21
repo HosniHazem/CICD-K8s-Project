@@ -63,15 +63,9 @@ jobs:
       with:
         images: ${{ env.DOCKER_IMAGE }}
         tags: |
-          type=sha,prefix={{branch}}-
+          type=sha,prefix=main-
           type=raw,value=latest,enable={{is_default_branch}}
     
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      with:
-        driver-opts: image=moby/buildkit:master
-        install: true
-
     - name: Build and push
       uses: docker/build-push-action@v5
       with:
@@ -81,8 +75,6 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=registry,ref=${{ env.DOCKER_IMAGE }}:buildcache
         cache-to: type=registry,ref=${{ env.DOCKER_IMAGE }}:buildcache,mode=max
-      env:
-        DOCKER_BUILDKIT: 1
 
   deploy:
     name: Deploy to Kubernetes
@@ -94,173 +86,58 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Install kubectl
-      run: |
-        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-        chmod +x kubectl
-        sudo mv kubectl /usr/local/bin/
-    
-    - name: Install Minikube
-      run: |
-        curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
-        sudo install minikube-linux-amd64 /usr/local/bin/minikube
-    
-    - name: Install container runtime
-      run: |
-        # Remove existing container runtimes to prevent conflicts
-        sudo apt-get remove -y containerd docker.io runc || true
-        
-        # Install prerequisites
-        sudo apt-get update -y
-        sudo apt-get install -y \
-          apt-transport-https \
-          ca-certificates \
-          curl \
-          gnupg \
-          lsb-release \
-          conntrack
-        
-        # Add Docker's official GPG key
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-        
-        # Set up the Docker repository
-        echo \
-          "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
-          $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-        
-        # Install Docker Engine
-        sudo apt-get update -y
-        sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-        
-        # Add current user to docker group
-        sudo usermod -aG docker $USER
-        newgrp docker
-        
-        # Verify Docker installation
-        docker --version
-        
     - name: Start Minikube
+      uses: medyagh/setup-minikube@latest
+      with:
+        driver: docker
+        kubernetes-version: v1.28.0
+    
+    - name: Verify cluster
       run: |
-        # Start Minikube with Docker driver
-        minikube start --driver=docker --force
-        minikube addons enable ingress
-        minikube update-context
-        
-        # Wait for cluster to be ready
-        minikube status
         kubectl cluster-info
         kubectl get nodes
     
-    - name: Create Kubernetes resources if not exists
+    - name: Deploy to Kubernetes
       run: |
-        # Create a simple deployment if kubernetes/ directory doesn't exist
-        if [ ! -d "kubernetes" ]; then
-          mkdir -p kubernetes
+        # Use existing k8s directory
+        if [ -d "k8s" ]; then
+          # Update image in deployment
+          sed -i "s|image:.*cicd-demo.*|image: ${{ env.DOCKER_IMAGE }}:main-${{ github.sha }}|" k8s/deployment.yaml
           
-          # Create deployment.yaml
-          cat > kubernetes/deployment.yaml <<EOF
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: cicd-demo
-            labels:
-              app: cicd-demo
-          spec:
-            replicas: 1
-            selector:
-              matchLabels:
-                app: cicd-demo
-            template:
-              metadata:
-                labels:
-                  app: cicd-demo
-              spec:
-                containers:
-                - name: cicd-demo
-                  image: ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
-                  ports:
-                  - containerPort: 3000
-                  resources:
-                    requests:
-                      cpu: 100m
-                      memory: 128Mi
-                    limits:
-                      cpu: 200m
-                      memory: 256Mi
-          EOF
+          # Apply manifests
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
           
-          # Create service.yaml
-          cat > kubernetes/service.yaml <<EOF
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: cicd-demo
-          spec:
-            selector:
-              app: cicd-demo
-            ports:
-              - protocol: TCP
-                port: 80
-                targetPort: 3000
-            type: NodePort
-          EOF
-        fi
-        
-        # Apply Kubernetes manifests
-        if [ -d "kubernetes" ]; then
-          # Replace image in deployment if needed
-          if [ -f "kubernetes/deployment.yaml" ]; then
-            sed -i "s|image: .*|image: ${{ env.DOCKER_IMAGE }}:${{ github.sha }}|" kubernetes/deployment.yaml
-          fi
-          
-          # Apply all YAML files in the kubernetes directory
-          for f in kubernetes/*.yaml; do
-            echo "Applying $f"
-            kubectl apply -f "$f"
-          done
-          
-          # Wait for deployment to complete
-          kubectl rollout status deployment/cicd-demo --timeout=120s
-          
-          # Get the Minikube service URL
-          minikube service cicd-demo --url
+          # Wait for deployment
+          kubectl rollout status deployment/cicd-demo-deployment --timeout=300s
         else
-          echo "No kubernetes directory found and could not create one"
+          echo "k8s directory not found"
           exit 1
         fi
     
     - name: Verify deployment
       run: |
-        export KUBECONFIG=$HOME/.kube/config
+        echo "=== Deployment Status ==="
+        kubectl get deployment cicd-demo-deployment -o wide
         
-        # Wait for deployment to be available
-        kubectl wait --for=condition=available --timeout=300s deployment/cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }}
+        echo "=== Pods ==="
+        kubectl get pods -l app=cicd-demo -o wide
         
-        # Verify deployment status
-        kubectl rollout status deployment/cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }} --timeout=300s
+        echo "=== Service ==="
+        kubectl get service cicd-demo-service
         
-        # Get deployment details
-        kubectl get deployment/cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }} -o wide
+        echo "=== Pod Logs ==="
+        kubectl logs -l app=cicd-demo --tail=20 || true
     
-    - name: Get service and pod info
+    - name: Test application
       run: |
-        export KUBECONFIG=$HOME/.kube/config
-        echo "=== Service Information ==="
-        kubectl get service/cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }} -o wide
-        echo -e "\n=== Pods Information ==="
-        kubectl get pods -l app=cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }} -o wide
+        SERVICE_URL=$(minikube service cicd-demo-service --url)
+        echo "Service URL: $SERVICE_URL"
         
-        # Get service URL
-        echo -e "\n=== Application URL ==="
-        minikube service cicd-demo --url -n ${{ env.KUBERNETES_NAMESPACE }}
+        sleep 10
         
-        # Get pod logs
-        echo -e "\n=== Pod Logs ==="
-        kubectl logs -l app=cicd-demo -n ${{ env.KUBERNETES_NAMESPACE }} --tail=50 || echo "No logs available yet"
-    
-    - name: Health check
-      run: |
-        export KUBECONFIG=$HOME/.kube/config
-        SERVICE_URL=$(minikube service cicd-demo --url -n ${{ env.KUBERNETES_NAMESPACE }} | head -n 1)
-        echo "Testing service at: $SERVICE_URL"
-        curl -sSf $SERVICE_URL || echo "Service not yet available"
+        echo "Testing root endpoint..."
+        curl -s $SERVICE_URL || echo "Failed"
+        
+        echo "Testing health endpoint..."
+        curl -s $SERVICE_URL/health || echo "Failed"
